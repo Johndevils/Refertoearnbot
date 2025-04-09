@@ -1,14 +1,51 @@
 <?php
 // Bot configuration - Get token from environment variable
 define('BOT_TOKEN', $_ENV['BOT_TOKEN'] ?? 'Place_Your_Token_Here');
+define('BOT_USERNAME', 'YourBotUsername'); // Replace with your bot's username (without @)
 define('API_URL', 'https://api.telegram.org/bot' . BOT_TOKEN . '/');
 define('USERS_FILE', 'users.json');
 define('ERROR_LOG', 'error.log');
+
+// Verification channels/groups (replace with your actual channel/group usernames)
+define('VERIFY_CHANNEL', '@YourChannelUsername');
+define('VERIFY_GROUP', '@YourGroupUsername');
 
 // Error logging function
 function logError($message) {
     $timestamp = date('Y-m-d H:i:s');
     file_put_contents(ERROR_LOG, "[$timestamp] $message\n", FILE_APPEND);
+}
+
+// Function to call Telegram API methods
+function callTelegramAPI($method, $params) {
+    $url = API_URL . $method . '?' . http_build_query($params);
+    $response = @file_get_contents($url);
+    if ($response === false) {
+        logError("API call failed for method $method");
+        return null;
+    }
+    return json_decode($response, true);
+}
+
+// Check if user is a member of both the channel and the group
+function checkUserSubscription($user_id) {
+    $chats = [VERIFY_CHANNEL, VERIFY_GROUP];
+    foreach ($chats as $chat) {
+        $result = callTelegramAPI('getChatMember', [
+            'chat_id' => $chat,
+            'user_id' => $user_id
+        ]);
+        if (!$result || !isset($result['result']['status'])) {
+            // Could not retrieve info, assume not subscribed
+            return false;
+        }
+        $status = $result['result']['status'];
+        // Valid statuses: "creator", "administrator", "member"
+        if (!in_array($status, ['creator', 'administrator', 'member'])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Data management functions
@@ -80,23 +117,40 @@ function getMainKeyboard() {
 function processUpdate($update) {
     $users = loadUsers();
 
+    // Determine user id from message or callback_query
     if (isset($update['message'])) {
         $chat_id = $update['message']['chat']['id'];
+    } elseif (isset($update['callback_query'])) {
+        $chat_id = $update['callback_query']['message']['chat']['id'];
+    } else {
+        return;
+    }
+
+    // Check subscription; user must be member of both channel and group
+    if (!checkUserSubscription($chat_id)) {
+        $verificationMsg = "🚫 You must join our channel " . VERIFY_CHANNEL . " and group " . VERIFY_GROUP . " to use this bot.";
+        sendMessage($chat_id, $verificationMsg);
+        return;
+    }
+
+    // Initialize new user if not exists
+    if (!isset($users[$chat_id])) {
+        $users[$chat_id] = [
+            'balance' => 0,
+            'last_earn' => 0,
+            'referrals' => 0,
+            'ref_code' => substr(md5($chat_id . time()), 0, 8),
+            'referred_by' => null
+        ];
+    }
+
+    if (isset($update['message'])) {
         $text = trim($update['message']['text'] ?? '');
 
-        // Create new user if doesn't exist
-        if (!isset($users[$chat_id])) {
-            $users[$chat_id] = [
-                'balance' => 0,
-                'last_earn' => 0,
-                'referrals' => 0,
-                'ref_code' => substr(md5($chat_id . time()), 0, 8),
-                'referred_by' => null
-            ];
-        }
-
         if (strpos($text, '/start') === 0) {
-            $ref = explode(' ', $text)[1] ?? null;
+            // Handle referral code if provided
+            $parts = explode(' ', $text);
+            $ref = $parts[1] ?? null;
             if ($ref && !$users[$chat_id]['referred_by']) {
                 foreach ($users as $id => $user) {
                     if ($user['ref_code'] === $ref && $id != $chat_id) {
@@ -114,19 +168,7 @@ function processUpdate($update) {
         }
         
     } elseif (isset($update['callback_query'])) {
-        $chat_id = $update['callback_query']['message']['chat']['id'];
         $data = $update['callback_query']['data'];
-        
-        if (!isset($users[$chat_id])) {
-            $users[$chat_id] = [
-                'balance' => 0,
-                'last_earn' => 0,
-                'referrals' => 0,
-                'ref_code' => substr(md5($chat_id . time()), 0, 8),
-                'referred_by' => null
-            ];
-        }
-
         switch ($data) {
             case 'earn':
                 $time_diff = time() - $users[$chat_id]['last_earn'];
@@ -158,7 +200,7 @@ function processUpdate($update) {
                 break;
                 
             case 'referrals':
-                $msg = "👥 Referral System\nYour code: <b>{$users[$chat_id]['ref_code']}</b>\nReferrals: {$users[$chat_id]['referrals']}\nInvite link: t.me/" . BOT_TOKEN . "?start={$users[$chat_id]['ref_code']}\n50 points per referral!";
+                $msg = "👥 Referral System\nYour code: <b>{$users[$chat_id]['ref_code']}</b>\nReferrals: {$users[$chat_id]['referrals']}\nInvite link: t.me/" . BOT_USERNAME . "?start={$users[$chat_id]['ref_code']}\n50 points per referral!";
                 break;
                 
             case 'withdraw':
